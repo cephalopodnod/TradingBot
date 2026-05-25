@@ -458,6 +458,7 @@ class DividendCaptureModel(BaseModel):
         total_dividends = float(events["Dividends"].sum()) if not events.empty else 0.0
         dividend_count = int(len(events))
 
+        eligible = days_to_dividend <= self.dividend_window and yield_pct >= self.min_yield
         return {
             "symbol": symbol,
             "current_price": current_price,
@@ -471,6 +472,7 @@ class DividendCaptureModel(BaseModel):
             "score": score,
             "dividend_count": dividend_count,
             "total_dividends": total_dividends,
+            "eligible": eligible,
         }
 
     def evaluate(self, data: pd.DataFrame, symbol: str) -> List[Signal]:
@@ -689,6 +691,18 @@ class TradingAgent:
             raise ValueError(f"Not enough historical data to analyze {symbol}.")
 
         candidates = self._build_rule_suggestions(prepared)
+        dividend_summary = self.models["dividend"].analyze_symbol(symbol, prepared, self._fetch_dividend_data(symbol))
+        if dividend_summary is not None and dividend_summary["eligible"]:
+            candidates.append(
+                {
+                    "model_name": "DividendCaptureModel",
+                    "score": float(dividend_summary["score"]),
+                    "confidence": min(1.0, float(dividend_summary["yield_pct"]) / 0.05),
+                    "rationale": f"Dividend capture model sees a {dividend_summary['yield_pct'] * 100:.2f}% yield with the next dividend in {dividend_summary['days_to_dividend']} days.",
+                    "parameters": {"dividend_window": self.models["dividend"].dividend_window, "min_yield": self.models["dividend"].min_yield},
+                }
+            )
+
         best = max(candidates, key=lambda item: item["score"])
 
         return ModelSuggestion(
@@ -709,6 +723,45 @@ class TradingAgent:
         if model_name not in rule_map:
             raise ValueError(f"Unsupported backtest model: {model_name}")
         return rule_map[model_name]
+
+    def _simulate_dividend_capture_backtest(
+        self,
+        symbol: str,
+        data: pd.DataFrame,
+        dividend_data: Optional[pd.DataFrame],
+        initial_cash: float = 1000.0,
+        target_return: float = 0.10,
+    ) -> Dict[str, object]:
+        summary = self.models["dividend"].analyze_symbol(symbol, data, dividend_data)
+        if summary is None:
+            return {
+                "model_name": "DividendCaptureModel",
+                "trade_count": 0,
+                "buy_count": 0,
+                "sell_count": 0,
+                "final_cash": initial_cash,
+                "account_change": 0.0,
+                "win_rate": 0.0,
+                "avg_return": 0.0,
+                "trade_events": [],
+            }
+
+        strategy_return = float(summary["recent_return"] if summary["hold_is_better"] else summary["yield_pct"])
+        if pd.isna(strategy_return):
+            strategy_return = 0.0
+
+        final_cash = initial_cash * (1.0 + max(strategy_return, 0.0))
+        return {
+            "model_name": "DividendCaptureModel",
+            "trade_count": 1 if summary["eligible"] else 0,
+            "buy_count": 1 if summary["eligible"] else 0,
+            "sell_count": 1 if summary["eligible"] and not summary["hold_is_better"] else 0,
+            "final_cash": final_cash,
+            "account_change": final_cash - initial_cash,
+            "win_rate": 1.0 if strategy_return >= target_return else 0.0,
+            "avg_return": strategy_return,
+            "trade_events": [],
+        }
 
     def _simulate_model_backtest(
         self,
@@ -810,21 +863,35 @@ class TradingAgent:
         selected_models: Optional[List[str]] = None,
         initial_cash: float = 1000.0,
         target_return: float = 0.10,
+        dividend_data_by_symbol: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> List[Dict[str, object]]:
         data = historical_data if historical_data is not None else self.fetch_market_data(symbol, period="1y")
         prepared = self._prepare_history(data)
-        if prepared.empty or len(prepared) < 40:
-            raise ValueError(f"Not enough historical data to backtest {symbol}.")
-
         models = selected_models or ["MovingAverageCross", "MomentumBreakout", "PullbackAfterMomentum"]
+        if prepared.empty:
+            raise ValueError(f"Not enough historical data to backtest {symbol}.")
+        if len(prepared) < 40 and "DividendCaptureModel" not in models:
+            raise ValueError(f"Not enough historical data to backtest {symbol}.")
+        dividend_data = None
+        if dividend_data_by_symbol is not None:
+            dividend_data = dividend_data_by_symbol.get(symbol)
         results = []
         for model_name in models:
-            result = self._simulate_model_backtest(
-                prepared,
-                model_name,
-                initial_cash=initial_cash,
-                target_return=target_return,
-            )
+            if model_name == "DividendCaptureModel":
+                result = self._simulate_dividend_capture_backtest(
+                    symbol,
+                    prepared,
+                    dividend_data,
+                    initial_cash=initial_cash,
+                    target_return=target_return,
+                )
+            else:
+                result = self._simulate_model_backtest(
+                    prepared,
+                    model_name,
+                    initial_cash=initial_cash,
+                    target_return=target_return,
+                )
             results.append(result)
 
         return results
@@ -1061,6 +1128,64 @@ class TradingAgent:
                     message=f"{signal.reason} | Action: {signal.action} | Symbol: {signal.symbol} | Qty: {signal.quantity:.4f} | Price: ${signal.price:.2f}",
                 )
         return all_signals
+
+    def scan_model(
+        self,
+        symbol: str,
+        model_name: str,
+        account: str = "paper",
+        allocation_amount: float = 250.0,
+        historical_data: Optional[pd.DataFrame] = None,
+        dividend_data: Optional[pd.DataFrame] = None,
+    ) -> List[Signal]:
+        if account not in {"paper", "live"}:
+            raise ValueError("account must be 'paper' or 'live'")
+
+        if symbol in self.custom_models and self.custom_models[symbol].model_name == model_name:
+            return self.scan_custom_model(symbol, account=account, historical_data=historical_data)
+
+        data = historical_data if historical_data is not None else self.fetch_market_data(symbol, period="1y")
+        prepared = self._prepare_history(data)
+        if prepared.empty:
+            return []
+
+        if model_name == "DividendCaptureModel":
+            resolved_dividend_data = dividend_data if dividend_data is not None else self._fetch_dividend_data(symbol)
+            summary = self.models["dividend"].analyze_symbol(symbol, prepared, resolved_dividend_data)
+            if summary is None or not summary["eligible"]:
+                return []
+
+            signal = Signal(
+                model_name="DividendCaptureModel",
+                symbol=symbol,
+                action="buy",
+                reason=f"Dividend capture model selects {symbol} with a {summary['yield_pct'] * 100:.2f}% yield and {summary['days_to_dividend']} days until the next payout.",
+                confidence=min(1.0, float(summary["yield_pct"]) / 0.05),
+                price=float(summary["current_price"]),
+                quantity=allocation_amount / float(summary["current_price"]),
+                account=account,
+            )
+            self.alert_manager.send(
+                title=f"Trade Alert: {signal.model_name}",
+                message=f"{signal.reason} | Action: {signal.action} | Symbol: {signal.symbol} | Qty: {signal.quantity:.4f} | Price: ${signal.price:.2f}",
+            )
+            return [signal]
+
+        config = CustomModelConfig(
+            symbol=symbol,
+            model_name=model_name,
+            account=account,
+            allocation_amount=allocation_amount,
+            parameters={},
+        )
+        signal = self._evaluate_custom_model_signal(prepared, config)
+        if signal is None:
+            return []
+        self.alert_manager.send(
+            title=f"Trade Alert: {signal.model_name}",
+            message=f"{signal.reason} | Action: {signal.action} | Symbol: {signal.symbol} | Qty: {signal.quantity:.4f} | Price: ${signal.price:.2f}",
+        )
+        return [signal]
 
     def _fetch_dividend_data(self, symbol: str, dividend_data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         if dividend_data is not None:

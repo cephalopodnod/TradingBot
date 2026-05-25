@@ -6,7 +6,7 @@ from tkinter.ttk import Button, Checkbutton, Combobox, Entry, Frame, Label, Note
 
 import pandas as pd
 
-from trading_agent import AlertManager, TradingAgent
+from trading_agent import AlertManager, CustomModelConfig, TradingAgent
 
 
 class GuiAlertManager(AlertManager):
@@ -19,7 +19,7 @@ class GuiAlertManager(AlertManager):
 
 
 class TradingBotWindow:
-    AVAILABLE_MODELS = ["MovingAverageCross", "MomentumBreakout", "PullbackAfterMomentum"]
+    AVAILABLE_MODELS = ["MovingAverageCross", "MomentumBreakout", "PullbackAfterMomentum", "DividendCaptureModel"]
 
     def __init__(self, root: Tk | None = None):
         self.root = root or Tk()
@@ -147,7 +147,7 @@ class TradingBotWindow:
 
         Button(action_row, text="Run S&P scan", command=self.run_sp500_scan).pack(side="left", padx=(0, 8))
         Button(action_row, text="Run profit target scan", command=self.run_profit_target_scan).pack(side="left", padx=(0, 8))
-        Button(action_row, text="Run custom model scan", command=self.run_custom_scan).pack(side="left")
+        Button(action_row, text="Run selected model scan", command=self.run_custom_scan).pack(side="left")
 
         account_row = Frame(frame)
         account_row.pack(fill="x", pady=(6, 8))
@@ -199,7 +199,7 @@ class TradingBotWindow:
         self.algorithm_allocation.insert(0, "250")
         self.algorithm_allocation.pack(side="left", padx=(8, 8))
 
-        Button(controls, text="Run custom model scan", command=self.run_custom_scan).pack(side="left")
+        Button(controls, text="Run selected model scan", command=self.run_custom_scan).pack(side="left")
 
     def append_log(self, message: str) -> None:
         self.alert_log.configure(state="normal")
@@ -483,12 +483,28 @@ class TradingBotWindow:
 
     def run_custom_scan(self) -> None:
         try:
-            if self.current_symbol not in self.agent.custom_models:
-                messagebox.showwarning("Trade", "Accept a custom model first in the Ticker Search or Algorithm Builder tab.")
+            symbol = self.current_symbol or self.ticker_entry.get().strip().upper()
+            if not symbol:
+                messagebox.showwarning("Trade", "Select or analyze a ticker before running the scan.")
                 return
-            signals = self.agent.scan_custom_model(self.current_symbol, account="paper")
+
+            if symbol in self.agent.custom_models:
+                model_name = self.agent.custom_models[symbol].model_name
+            elif self.best_model_name:
+                model_name = self.best_model_name
+            elif self.current_suggestion is not None:
+                model_name = self.current_suggestion.model_name
+            else:
+                model_name = None
+
+            if model_name is None:
+                messagebox.showwarning("Trade", "Accept a custom model or analyze a ticker before running the scan.")
+                return
+
+            allocation = float(self.ticker_allocation.get().strip()) if self.ticker_allocation.get().strip() else 250.0
+            signals = self.agent.scan_model(symbol, model_name, account="paper", allocation_amount=allocation, historical_data=self.last_history)
             self._store_pending_signals(signals)
-            self.append_log(f"Custom model scan returned {len(signals)} signal(s).")
+            self.append_log(f"Selected model scan returned {len(signals)} signal(s) for {symbol} using {model_name}.")
         except Exception as exc:
             messagebox.showerror("Trade", str(exc))
 

@@ -219,6 +219,43 @@ class TradingAgentTests(unittest.TestCase):
         self.assertTrue(all("final_cash" in result for result in results))
         self.assertTrue(all("trade_count" in result for result in results))
 
+    def test_backtest_ticker_models_supports_dividend_capture(self):
+        agent = TradingAgent()
+        now = pd.Timestamp.now("UTC")
+        history = pd.DataFrame(
+            {
+                "Date": pd.date_range(now - pd.Timedelta(days=30), periods=30, freq="D"),
+                "Close": [100.0] * 30,
+            }
+        )
+
+        results = agent.backtest_ticker_models(
+            "FAKE",
+            historical_data=history,
+            selected_models=["DividendCaptureModel"],
+            initial_cash=1000.0,
+            dividend_data_by_symbol={"FAKE": pd.DataFrame({"Date": [now + pd.Timedelta(days=5)], "Dividends": [1.5]})},
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["model_name"], "DividendCaptureModel")
+        self.assertGreaterEqual(results[0]["final_cash"], 1000.0)
+
+    def test_scan_model_handles_dividend_models(self):
+        agent = TradingAgent()
+        now = pd.Timestamp.now("UTC")
+        history = pd.DataFrame(
+            {
+                "Date": pd.date_range(now - pd.Timedelta(days=30), periods=30, freq="D"),
+                "Close": [100.0] * 30,
+            }
+        )
+        dividend_data = pd.DataFrame({"Date": [now + pd.Timedelta(days=5)], "Dividends": [1.5]})
+
+        dividend_signals = agent.scan_model("FAKE", "DividendCaptureModel", historical_data=history, dividend_data=dividend_data, allocation_amount=250.0)
+
+        self.assertEqual(dividend_signals[0].model_name, "DividendCaptureModel")
+
     def test_add_ticker_position_attaches_algorithm_and_records_alert(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
