@@ -62,6 +62,15 @@ class CustomModelConfig:
     parameters: Dict[str, float]
 
 
+@dataclass
+class MarketQuote:
+    symbol: str
+    price: float
+    timestamp: datetime
+    delay_seconds: float
+    source: str
+
+
 class AlertManager:
     def __init__(
         self,
@@ -542,7 +551,8 @@ class TradingAgent:
         return df
 
     def fetch_market_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
-        df = yf.download(symbol, period=period, progress=False)
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval="1d", actions=False, auto_adjust=False, progress=False)
         if df.empty:
             raise ValueError(f"No market data returned for {symbol}")
         df = df.reset_index()
@@ -553,6 +563,50 @@ class TradingAgent:
             raise ValueError(f"Missing Close column for {symbol}")
         df["Daily_Change_Percent"] = df["Close"].pct_change() * 100
         return df
+
+    def fetch_latest_quote(self, symbol: str) -> MarketQuote:
+        ticker = yf.Ticker(symbol)
+        price = None
+        timestamp = None
+        source = "yfinance.fast_info"
+
+        fast_info = getattr(ticker, "fast_info", {}) or {}
+        if isinstance(fast_info, dict):
+            price = fast_info.get("last_price") or fast_info.get("regular_market_price")
+            last_trade = fast_info.get("last_trade_time") or fast_info.get("regular_market_time") or fast_info.get("last_trade_timestamp")
+            if last_trade is not None:
+                if isinstance(last_trade, (int, float)):
+                    timestamp = datetime.fromtimestamp(float(last_trade), tz=timezone.utc)
+                elif isinstance(last_trade, datetime):
+                    timestamp = last_trade.astimezone(timezone.utc)
+
+        if price is None or timestamp is None:
+            info = getattr(ticker, "info", {}) or {}
+            if isinstance(info, dict):
+                price = price or info.get("regularMarketPrice") or info.get("previousClose")
+                last_trade = info.get("regularMarketTime") or info.get("postMarketTime") or info.get("preMarketTime")
+                if last_trade is not None and isinstance(last_trade, (int, float)):
+                    timestamp = datetime.fromtimestamp(float(last_trade), tz=timezone.utc)
+
+        if price is None or timestamp is None:
+            source = "yfinance.history"
+            history = ticker.history(period="1d", interval="1m", actions=False, progress=False)
+            if history.empty:
+                raise ValueError(f"Unable to retrieve live quote for {symbol}")
+            recent = history.reset_index().iloc[-1]
+            price = float(recent["Close"])
+            timestamp = recent["Datetime"]
+            if isinstance(timestamp, pd.Timestamp):
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.tz_localize(timezone.utc)
+                else:
+                    timestamp = timestamp.tz_convert(timezone.utc)
+
+        if price is None or timestamp is None:
+            raise ValueError(f"Unable to retrieve live quote for {symbol}")
+
+        delay = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+        return MarketQuote(symbol=symbol, price=float(price), timestamp=timestamp, delay_seconds=delay, source=source)
 
     def _prepare_history(self, data: pd.DataFrame) -> pd.DataFrame:
         dt = data.copy()

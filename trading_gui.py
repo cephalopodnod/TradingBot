@@ -112,6 +112,9 @@ class TradingBotWindow:
         self.graph_canvas = Canvas(frame, bg="#ffffff", height=260)
         self.graph_canvas.pack(fill="x", pady=(8, 8))
 
+        self.ticker_status_label = Label(frame, text="Quote delay: unknown", font=("Segoe UI", 10, "italic"))
+        self.ticker_status_label.pack(anchor="w", pady=(0, 4))
+
         self.ticker_result = ScrolledText(frame, height=10, wrap="word")
         self.ticker_result.pack(fill="x", pady=(0, 8))
         self.ticker_result.configure(state="disabled")
@@ -309,6 +312,12 @@ class TradingBotWindow:
             data = self.agent.fetch_market_data(symbol, period="1y")
             self.last_history = data
             self._render_price_chart(data)
+
+            quote = self.agent.fetch_latest_quote(symbol)
+            self.ticker_status_label.configure(
+                text=f"Latest quote: ${quote.price:.2f} at {quote.timestamp.isoformat()} (delay {quote.delay_seconds:.1f}s, source {quote.source})"
+            )
+
             suggestion = self.agent.analyze_ticker_for_model(symbol, historical_data=data)
             self.current_suggestion = suggestion
             self.best_model_name = suggestion.model_name
@@ -317,6 +326,9 @@ class TradingBotWindow:
                 "\n".join(
                     [
                         f"Symbol: {suggestion.symbol}",
+                        f"Latest quote: ${quote.price:.2f}",
+                        f"Quote timestamp: {quote.timestamp.isoformat()}",
+                        f"Delay: {quote.delay_seconds:.1f} seconds",
                         f"Current best model: {suggestion.model_name}",
                         f"Score: {suggestion.score:.3f}",
                         f"Confidence: {suggestion.confidence:.3f}",
@@ -324,7 +336,7 @@ class TradingBotWindow:
                     ]
                 ),
             )
-            self.append_log(f"Analyzed {symbol}: {suggestion.model_name}")
+            self.append_log(f"Analyzed {symbol}: {suggestion.model_name} with {quote.delay_seconds:.1f}s quote delay")
         except Exception as exc:
             messagebox.showerror("Ticker Search", str(exc))
 
